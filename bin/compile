@@ -7,5 +7,8 @@ npmrc="$(cat $ENV_DIR/NPMRC)"
 if [ "$npmrc" != "" ]; then
 	echo "-----> Using .npmrc from config var NPMRC"
 	echo "$npmrc" > "$build_dir/.npmrc"
-	exit 0
 fi
+
+echo "export DD_GIT_COMMIT_SHA=$SOURCE_VERSION" >> $build_dir/.profile.d/datadog.sh
+
+exit 0
