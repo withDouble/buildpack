@@ -2,11 +2,30 @@
 
 ENV_DIR=${3:-}
 build_dir=${1:-}
-npmrc="$(cat $ENV_DIR/NPMRC)"
 
-if [ "$npmrc" != "" ]; then
-	echo "-----> Using .npmrc from config var NPMRC"
-	echo "$npmrc" > "$build_dir/.npmrc"
+# Install 1Password CLI if not present
+if ! command -v op &> /dev/null; then
+	echo "-----> Installing 1Password CLI"
+	OP_VERSION="v2.26.0"
+	ARCH="amd64"
+	OS="linux"
+	
+	OP_URL="https://cache.agilebits.com/dist/1P/op2/pkg/${OP_VERSION}/op_${OS}_${ARCH}_${OP_VERSION}.zip"
+	
+	curl -sSfL "${OP_URL}" -o /tmp/op.zip
+	unzip -q /tmp/op.zip -d /tmp
+	chmod +x /tmp/op
+	mv /tmp/op /usr/local/bin/op
+	rm -f /tmp/op.zip
+fi
+
+# Get token from 1Password
+export OP_SERVICE_ACCOUNT_TOKEN="${OP_SERVICE_ACCOUNT_TOKEN:-}"
+npm_read_token=$(op read "op://CI-CD/NPM Read Token/password")
+
+if [ "$npm_read_token" != "" ]; then
+	echo "-----> Using .npmrc from 1Password"
+	echo "//registry.npmjs.org/:_authToken=${npm_read_token}" > "$build_dir/.npmrc"
 fi
 
 echo "export DD_GIT_COMMIT_SHA=$SOURCE_VERSION" >> $build_dir/.profile.d/datadog.sh
