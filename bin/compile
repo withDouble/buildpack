@@ -4,30 +4,54 @@ ENV_DIR=${3:-}
 build_dir=${1:-}
 
 # Install 1Password CLI if not present
-if ! command -v op &> /dev/null; then
+# Install to build_dir/.heroku/bin since we don't have write access to /usr/local/bin on Heroku
+OP_BIN_DIR="${build_dir}/.heroku/bin"
+mkdir -p "${OP_BIN_DIR}"
+
+if [ ! -f "${OP_BIN_DIR}/op" ]; then
 	echo "-----> Installing 1Password CLI"
-	OP_VERSION="v2.26.0"
-	ARCH="amd64"
-	OS="linux"
-	
-	OP_URL="https://cache.agilebits.com/dist/1P/op2/pkg/${OP_VERSION}/op_${OS}_${ARCH}_${OP_VERSION}.zip"
-	
-	curl -sSfL "${OP_URL}" -o /tmp/op.zip
+	curl -sSfL "https://cache.agilebits.com/dist/1P/op2/pkg/v2.26.0/op_linux_amd64_v2.26.0.zip" -o /tmp/op.zip
 	unzip -q /tmp/op.zip -d /tmp
 	chmod +x /tmp/op
-	mv /tmp/op /usr/local/bin/op
+	mv /tmp/op "${OP_BIN_DIR}/op"
 	rm -f /tmp/op.zip
 fi
 
-# Get token from 1Password
-export OP_SERVICE_ACCOUNT_TOKEN="${OP_SERVICE_ACCOUNT_TOKEN:-}"
-npm_read_token=$(op read "op://CI-CD/NPM Read Token/password")
+# Add op directory to PATH
+export PATH="${OP_BIN_DIR}:${PATH}"
 
-if [ "$npm_read_token" != "" ]; then
-	echo "-----> Using .npmrc from 1Password"
-	echo "//registry.npmjs.org/:_authToken=${npm_read_token}" > "$build_dir/.npmrc"
+# Get 1Password service account token from ENV_DIR
+# This token is used to authenticate with 1Password CLI
+OP_SERVICE_ACCOUNT_TOKEN="$(cat "$ENV_DIR/OP_SERVICE_ACCOUNT_TOKEN" 2>/dev/null)"
+if [ -z "$OP_SERVICE_ACCOUNT_TOKEN" ]; then
+	echo "-----> ERROR: OP_SERVICE_ACCOUNT_TOKEN not found or empty in ENV_DIR"
+	echo "       Set OP_SERVICE_ACCOUNT_TOKEN config var in Heroku to enable private npm package access"
+	exit 1
+fi
+export OP_SERVICE_ACCOUNT_TOKEN
+
+echo "-----> Fetching NPM token from 1Password"
+
+# Capture both stdout and stderr, and check exit code
+if npm_read_token=$(op read "op://CI-CD/NPM Read Token/password" 2>&1); then
+	if [ -n "$npm_read_token" ]; then
+		echo "-----> Using .npmrc from 1Password"
+		echo "//registry.npmjs.org/:_authToken=${npm_read_token}" > "$build_dir/.npmrc"
+	else
+		echo "-----> ERROR: NPM token retrieved but is empty"
+		echo "       Verify the secret exists in 1Password at op://CI-CD/NPM Read Token/password"
+		exit 1
+	fi
+else
+	error_output="$npm_read_token"
+	echo "-----> ERROR: Failed to read token from 1Password"
+	echo "       Error: ${error_output}"
+	echo "       Verify OP_SERVICE_ACCOUNT_TOKEN is set correctly in Heroku config vars"
+	exit 1
 fi
 
+# Ensure profile.d directory exists for Datadog env
+mkdir -p "$build_dir/.profile.d"
 echo "export DD_GIT_COMMIT_SHA=$SOURCE_VERSION" >> $build_dir/.profile.d/datadog.sh
 
 exit 0
