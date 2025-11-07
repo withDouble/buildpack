@@ -1,57 +1,95 @@
 #!/usr/bin/env bash
 
-ENV_DIR=${3:-}
-build_dir=${1:-}
+# Abort immediately if anything goes wrong, don’t guess, don’t continue.
+set -euo pipefail
 
-# Install 1Password CLI if not present
-# Install to build_dir/.heroku/bin since we don't have write access to /usr/local/bin on Heroku
-OP_BIN_DIR="${build_dir}/.heroku/bin"
-mkdir -p "${OP_BIN_DIR}"
+# Heroku buildpack args: compile BUILD_DIR CACHE_DIR ENV_DIR
+BUILD_DIR="${1:?missing BUILD_DIR (arg 1)}"
+CACHE_DIR="${2:?missing CACHE_DIR (arg 2)}"
+ENV_DIR="${3:?missing ENV_DIR (arg 3)}"
 
-if [ ! -f "${OP_BIN_DIR}/op" ]; then
-	echo "-----> Installing 1Password CLI"
-	curl -sSfL "https://cache.agilebits.com/dist/1P/op2/pkg/v2.26.0/op_linux_amd64_v2.26.0.zip" -o /tmp/op.zip
-	unzip -q /tmp/op.zip -d /tmp
-	chmod +x /tmp/op
-	mv /tmp/op "${OP_BIN_DIR}/op"
-	rm -f /tmp/op.zip
-fi
+# 1Password reference path
+VAULT_NAME="CI-CD"
+ITEM_NAME="NPM Read Token"
+FIELD_NAME="password"
+OP_NPM_TOKEN_PATH="op://${VAULT_NAME}/${ITEM_NAME}/${FIELD_NAME}"
 
-# Add op directory to PATH
+# Directories - use cache directory to avoid re-downloading the 1Password CLI on every build
+OP_BIN_DIR="${CACHE_DIR}/opcli/bin"
+mkdir -p "$OP_BIN_DIR"
+
+# Add to PATH for this build step
 export PATH="${OP_BIN_DIR}:${PATH}"
 
-# Get 1Password service account token from ENV_DIR
-# This token is used to authenticate with 1Password CLI
-OP_SERVICE_ACCOUNT_TOKEN="$(cat "$ENV_DIR/OP_SERVICE_ACCOUNT_TOKEN" 2>/dev/null)"
-if [ -z "$OP_SERVICE_ACCOUNT_TOKEN" ]; then
-	echo "-----> ERROR: OP_SERVICE_ACCOUNT_TOKEN not found or empty in ENV_DIR"
-	echo "       Set OP_SERVICE_ACCOUNT_TOKEN config var in Heroku to enable private npm package access"
-	exit 1
+# Install 1Password CLI (cached)
+if [ ! -x "${OP_BIN_DIR}/op" ]; then
+  echo "-----> Installing 1Password CLI (cached)"
+  curl -fsSL "https://cache.agilebits.com/dist/1P/op2/pkg/v2.26.0/op_linux_amd64_v2.26.0.zip" -o /tmp/op.zip
+  unzip -q /tmp/op.zip -d /tmp
+  install -m 0755 /tmp/op "${OP_BIN_DIR}/op"
+  rm -f /tmp/op.zip
 fi
-export OP_SERVICE_ACCOUNT_TOKEN
+
+# Add OP directory to PATH
+export PATH="${OP_BIN_DIR}:${PATH}"
+
+# Load 1Password SA token from ENV_DIR
+if [ ! -f "${ENV_DIR}/OP_SERVICE_ACCOUNT_TOKEN" ] || [ ! -s "${ENV_DIR}/OP_SERVICE_ACCOUNT_TOKEN" ]; then
+  echo "-----> ERROR: OP_SERVICE_ACCOUNT_TOKEN not found or empty in ENV_DIR"
+  exit 1
+fi
+export OP_SERVICE_ACCOUNT_TOKEN="$(cat "${ENV_DIR}/OP_SERVICE_ACCOUNT_TOKEN")"
 
 echo "-----> Fetching NPM token from 1Password"
+NPM_TOKEN_VALUE="$(
+  op read "${OP_NPM_TOKEN_PATH}" 2>/dev/null || true
+)"
 
-# Capture both stdout and stderr, and check exit code
-if npm_read_token=$(op read "op://CI-CD/NPM Read Token/password" 2>&1); then
-	if [ -n "$npm_read_token" ]; then
-		echo "-----> Using .npmrc from 1Password"
-		echo "//registry.npmjs.org/:_authToken=${npm_read_token}" > "$build_dir/.npmrc"
-	else
-		echo "-----> ERROR: NPM token retrieved but is empty"
-		echo "       Verify the secret exists in 1Password at op://CI-CD/NPM Read Token/password"
-		exit 1
-	fi
+if [ -z "${NPM_TOKEN_VALUE}" ]; then
+  echo "-----> ERROR: NPM token missing or unreadable from 1Password"
+  exit 1
+fi
+
+# Make token available to the Node.js buildpack (no file written)
+export NPM_TOKEN="${NPM_TOKEN_VALUE}"
+
+# Constrain npm to always-auth so scoped packages work consistently
+export NPM_CONFIG_ALWAYS_AUTH=true
+
+# Ensure .npmrc exists and contains required lines
+NPMRC_PATH="${BUILD_DIR}/.npmrc"
+REQUIRED_AUTH_LINE='always-auth=true'
+REQUIRED_TOKEN_LINE='//registry.npmjs.org/:_authToken=${NPM_TOKEN}'
+
+echo "-----> Ensuring .npmrc configuration"
+
+# If .npmrc doesn't exist, create it
+if [ ! -f "${NPMRC_PATH}" ]; then
+  echo "-----> Creating new .npmrc"
+  cat > "${NPMRC_PATH}" <<EOF
+${REQUIRED_AUTH_LINE}
+${REQUIRED_TOKEN_LINE}
+EOF
 else
-	error_output="$npm_read_token"
-	echo "-----> ERROR: Failed to read token from 1Password"
-	echo "       Error: ${error_output}"
-	echo "       Verify OP_SERVICE_ACCOUNT_TOKEN is set correctly in Heroku config vars"
-	exit 1
+  # Ensure it has the always-auth line
+  if ! grep -qF "${REQUIRED_AUTH_LINE}" "${NPMRC_PATH}"; then
+    echo "${REQUIRED_AUTH_LINE}" >> "${NPMRC_PATH}"
+  fi
+
+  # Ensure it has the token reference line
+  if ! grep -qF "${REQUIRED_TOKEN_LINE}" "${NPMRC_PATH}"; then
+    echo "${REQUIRED_TOKEN_LINE}" >> "${NPMRC_PATH}"
+  fi
+fi
+
+# Sanity check: confirm file was created and contains both lines
+if [ ! -s "${NPMRC_PATH}" ] || ! grep -qF "${REQUIRED_TOKEN_LINE}" "${NPMRC_PATH}"; then
+  echo "-----> ERROR: Failed to create or verify .npmrc"
+  exit 1
 fi
 
 # Ensure profile.d directory exists for Datadog env
-mkdir -p "$build_dir/.profile.d"
-echo "export DD_GIT_COMMIT_SHA=$SOURCE_VERSION" >> $build_dir/.profile.d/datadog.sh
+mkdir -p "$BUILD_DIR/.profile.d"
+echo "export DD_GIT_COMMIT_SHA=$SOURCE_VERSION" >> $BUILD_DIR/.profile.d/datadog.sh
 
 exit 0
