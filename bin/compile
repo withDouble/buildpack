@@ -50,43 +50,15 @@ if [ -z "${NPM_TOKEN_VALUE}" ]; then
   exit 1
 fi
 
-# Make token available to the Node.js buildpack (no file written)
-export NPM_TOKEN="${NPM_TOKEN_VALUE}"
-
-# Constrain npm to always-auth so scoped packages work consistently
-export NPM_CONFIG_ALWAYS_AUTH=true
-
-# Ensure .npmrc exists and contains required lines
-NPMRC_PATH="${BUILD_DIR}/.npmrc"
-REQUIRED_AUTH_LINE='always-auth=true'
-REQUIRED_TOKEN_LINE='//registry.npmjs.org/:_authToken=${NPM_TOKEN}'
-
-echo "-----> Ensuring .npmrc configuration"
-
-# If .npmrc doesn't exist, create it
-if [ ! -f "${NPMRC_PATH}" ]; then
-  echo "-----> Creating new .npmrc"
-  cat > "${NPMRC_PATH}" <<EOF
-${REQUIRED_AUTH_LINE}
-${REQUIRED_TOKEN_LINE}
+# Write a project-level .npmrc for the build (literal token)
+PROJ_NPMRC="${BUILD_DIR}/.npmrc"
+echo "-----> Writing build-scoped project .npmrc with literal token"
+cat > "${PROJ_NPMRC}" <<EOF
+always-auth=true
+@withdouble:registry=https://registry.npmjs.org/
+//registry.npmjs.org/:_authToken=${NPM_TOKEN_VALUE}
 EOF
-else
-  # Ensure it has the always-auth line
-  if ! grep -qF "${REQUIRED_AUTH_LINE}" "${NPMRC_PATH}"; then
-    echo "${REQUIRED_AUTH_LINE}" >> "${NPMRC_PATH}"
-  fi
-
-  # Ensure it has the token reference line
-  if ! grep -qF "${REQUIRED_TOKEN_LINE}" "${NPMRC_PATH}"; then
-    echo "${REQUIRED_TOKEN_LINE}" >> "${NPMRC_PATH}"
-  fi
-fi
-
-# Sanity check: confirm file was created and contains both lines
-if [ ! -s "${NPMRC_PATH}" ] || ! grep -qF "${REQUIRED_TOKEN_LINE}" "${NPMRC_PATH}"; then
-  echo "-----> ERROR: Failed to create or verify .npmrc"
-  exit 1
-fi
+chmod 0600 "${PROJ_NPMRC}"
 
 # Ensure profile.d directory exists for Datadog env
 mkdir -p "$BUILD_DIR/.profile.d"
